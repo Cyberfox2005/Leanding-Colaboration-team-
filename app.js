@@ -1,174 +1,354 @@
 "use strict";
 
-const STORAGE_KEY = "sidequest-projects-v1";
+const CONTRIBUTORS = [
+  {
+    handle: "Cyberfox2005",
+    name: "Benachi Abd elouaheb",
+    role: "Developer & creator",
+    accent: "green"
+  },
+  {
+    handle: "Mohking999",
+    name: "Mohamed Abdrazak",
+    role: "Developer & creator",
+    accent: "orange"
+  }
+];
 
+const peopleGrid = document.querySelector("#people-grid");
 const projectGrid = document.querySelector("#project-grid");
+const projectsStatus = document.querySelector("#projects-status");
 const emptyState = document.querySelector("#empty-state");
-const dialog = document.querySelector("#project-dialog");
-const projectForm = document.querySelector("#project-form");
 const searchInput = document.querySelector("#search-input");
-const formError = document.querySelector("#form-error");
-const toast = document.querySelector("#toast");
-let projects = [];
+let repositories = [];
+let privateRepositories = [];
 let activeFilter = "all";
-let toastTimeout;
+let failedProfiles = [];
+let signedInHandle = "";
+const privateAccessTitle = document.querySelector("#private-access-title");
+const privateAccessDescription = document.querySelector("#private-access-description");
+const privateSignIn = document.querySelector("#private-sign-in");
+const privateSignOut = document.querySelector("#private-sign-out");
+const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+const revealObserver = !reducedMotion && "IntersectionObserver" in window
+  ? new IntersectionObserver((entries, observer) => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting) continue;
+        entry.target.classList.add("is-visible");
+        observer.unobserve(entry.target);
+      }
+    }, { threshold: 0.12, rootMargin: "0px 0px -24px 0px" })
+  : null;
 
-function readProjects() {
-  try {
-    const stored = localStorage.getItem(STORAGE_KEY);
-    if (!stored) return [];
-    const parsed = JSON.parse(stored);
-    if (!Array.isArray(parsed)) throw new Error("Saved project data is not a list.");
-    return parsed.filter((project) =>
-      project &&
-      typeof project.id === "string" &&
-      typeof project.name === "string" &&
-      typeof project.repo === "string" &&
-      typeof project.description === "string" &&
-      typeof project.owner === "string" &&
-      typeof project.needsHelp === "boolean"
-    );
-  } catch (error) {
-    console.error("Could not load saved projects:", error);
-    showToast("Could not load saved projects. Check this browser's storage settings.");
-    return [];
+function revealElement(element, index = 0) {
+  element.classList.add("reveal");
+  element.style.setProperty("--reveal-delay", `${Math.min(index, 5) * 65}ms`);
+  if (!revealObserver) {
+    element.classList.add("is-visible");
+    return;
   }
+  revealObserver.observe(element);
 }
 
-function saveProjects() {
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(projects));
-    return true;
-  } catch (error) {
-    console.error("Could not save projects:", error);
-    showToast("Could not save. Check this browser's storage settings and try again.");
-    return false;
-  }
+function createElement(tag, className, text) {
+  const element = document.createElement(tag);
+  if (className) element.className = className;
+  if (text !== undefined) element.textContent = text;
+  return element;
 }
 
-function showToast(message) {
-  toast.textContent = message;
-  toast.classList.add("visible");
-  window.clearTimeout(toastTimeout);
-  toastTimeout = window.setTimeout(() => toast.classList.remove("visible"), 3500);
-}
-
-function safeRepoUrl(value) {
-  try {
-    const url = new URL(value);
-    if (url.protocol !== "https:" || url.hostname !== "github.com") return null;
-    const parts = url.pathname.split("/").filter(Boolean);
-    if (parts.length !== 2 || parts.some((part) => part === "." || part === "..")) return null;
-    return `https://github.com/${parts.map(encodeURIComponent).join("/")}`;
-  } catch {
-    return null;
-  }
-}
-
-function makeLink(label, href, className) {
-  const link = document.createElement("a");
-  link.textContent = label;
-  link.href = href;
+function createLink(label, url, className) {
+  const link = createElement("a", className, label);
+  link.href = url;
   link.target = "_blank";
   link.rel = "noopener noreferrer";
-  if (className) link.className = className;
   return link;
 }
 
+async function githubRequest(path) {
+  const response = await fetch(`https://api.github.com${path}`, {
+    headers: { Accept: "application/vnd.github+json" }
+  });
+
+  if (!response.ok) {
+    if (response.status === 404) throw new Error("This GitHub profile could not be found.");
+    if (response.status === 403 || response.status === 429) {
+      throw new Error("GitHub’s public API is temporarily rate-limited. Please try again later.");
+    }
+    throw new Error(`GitHub returned an error (${response.status}).`);
+  }
+
+  return response.json();
+}
+
+async function fetchRepositories(handle) {
+  const allRepositories = [];
+  let page = 1;
+  let pageRepositories;
+
+  do {
+    pageRepositories = await githubRequest(
+      `/users/${encodeURIComponent(handle)}/repos?type=owner&sort=updated&per_page=100&page=${page}`
+    );
+    if (!Array.isArray(pageRepositories)) {
+      throw new Error("GitHub returned an unexpected repository list.");
+    }
+    allRepositories.push(...pageRepositories);
+    page += 1;
+  } while (pageRepositories.length === 100);
+
+  return allRepositories;
+}
+
+function renderPerson(contributor, profile, error) {
+  const card = createElement("article", `person-card person-card-${contributor.accent}`);
+  const top = createElement("div", "person-card-top");
+
+  if (profile && profile.avatar_url) {
+    const avatar = createElement("img", "person-avatar");
+    avatar.src = profile.avatar_url;
+    avatar.alt = `${contributor.name}'s GitHub avatar`;
+    avatar.width = 64;
+    avatar.height = 64;
+    avatar.loading = "lazy";
+    top.append(avatar);
+  } else {
+    top.append(createElement("span", "person-avatar person-avatar-fallback", contributor.name.charAt(0)));
+  }
+
+  const identity = createElement("div", "person-identity");
+  identity.append(
+    createElement("p", "eyebrow", contributor.role),
+    createElement("h3", "", contributor.name),
+    createElement("p", "person-handle", `@${contributor.handle}`)
+  );
+  top.append(identity);
+
+  const biography = profile && profile.bio
+    ? profile.bio
+    : error
+      ? error.message
+      : "Developer sharing projects and experiments on GitHub.";
+  card.append(top, createElement("p", "person-bio", biography));
+
+  if (profile) {
+    const stats = createElement("div", "person-stats");
+    stats.append(
+      createElement("span", "", `${profile.public_repos} public repos`),
+      createElement("span", "", `${profile.followers} followers`)
+    );
+    if (profile.location) stats.append(createElement("span", "", profile.location));
+    card.append(stats);
+  }
+
+  const footer = createElement("div", "person-footer");
+  footer.append(
+    createElement("span", "person-currently", error ? "Profile temporarily unavailable" : "Find me on GitHub"),
+    createLink("View profile ↗", `https://github.com/${contributor.handle}`, "person-profile-link")
+  );
+  card.append(footer);
+  return card;
+}
+
+function renderPeople(results) {
+  peopleGrid.replaceChildren();
+  for (const [index, result] of results.entries()) {
+    const card = renderPerson(result.contributor, result.profile, result.error);
+    peopleGrid.append(card);
+    revealElement(card, index);
+  }
+}
+
 function renderProjects() {
+  const allRepositories = [...repositories, ...privateRepositories];
   const query = searchInput.value.trim().toLocaleLowerCase();
-  const visibleProjects = projects.filter((project) => {
-    const matchesFilter = activeFilter === "all" || project.needsHelp;
-    const matchesQuery = `${project.name} ${project.repo} ${project.description} ${project.owner}`
-      .toLocaleLowerCase()
-      .includes(query);
-    return matchesFilter && matchesQuery;
+  const visibleRepositories = allRepositories.filter((repository) => {
+    const matchesOwner = activeFilter === "all" || repository.owner.login === activeFilter;
+    const searchContent = `${repository.name} ${repository.description || ""} ${repository.owner.login} ${repository.language || ""}`;
+    return matchesOwner && searchContent.toLocaleLowerCase().includes(query);
   });
 
   projectGrid.replaceChildren();
-  for (const project of visibleProjects) {
-    const repoUrl = safeRepoUrl(project.repo);
-    if (!repoUrl) continue;
-
-    const card = document.createElement("article");
-    card.className = "project-card";
-
-    const top = document.createElement("div");
-    top.className = "card-topline";
-    const repoName = document.createElement("span");
-    repoName.className = "repo-name";
-    repoName.textContent = project.repo.replace(/^https:\/\/github\.com\//, "");
-    const badge = document.createElement("span");
-    badge.className = `project-badge${project.needsHelp ? "" : " sharing"}`;
-    badge.textContent = project.needsHelp ? "Looking for help" : "Sharing progress";
-    top.append(repoName, badge);
-
-    const title = document.createElement("h3");
-    title.className = "project-name";
-    title.textContent = project.name;
-    const description = document.createElement("p");
-    description.className = "project-description";
-    description.textContent = project.description;
-
-    const bottom = document.createElement("div");
-    bottom.className = "card-bottom";
-    const owner = document.createElement("span");
-    owner.className = "project-owner";
-    owner.append(document.createTextNode("by "));
-    const ownerName = document.createElement("span");
-    ownerName.textContent = project.owner;
-    owner.append(ownerName);
-
-    const links = document.createElement("div");
-    links.className = "card-links";
-    links.append(
-      makeLink("Issues ↗", `${repoUrl}/issues`),
-      makeLink("Pull requests ↗", `${repoUrl}/pulls`),
-      makeLink("Open repo ↗", repoUrl, "repo-link")
+  for (const [index, repository] of visibleRepositories.entries()) {
+    const card = createElement(
+      "article",
+      `project-card${repository.owner.login.toLowerCase() === "mohking999" ? " project-card-mohamed" : ""}${repository.private ? " project-card-private" : ""}`
     );
-    const remove = document.createElement("button");
-    remove.type = "button";
-    remove.className = "delete-project";
-    remove.textContent = "Remove";
-    remove.setAttribute("aria-label", `Remove ${project.name} from this browser's board`);
-    remove.addEventListener("click", () => removeProject(project.id));
-    links.append(remove);
+    const top = createElement("div", "card-topline");
+    const owner = createLink(`@${repository.owner.login}`, `https://github.com/${repository.owner.login}`, "repo-owner");
+    const updatedAt = new Date(repository.updated_at);
+    const updated = createElement(
+      "span",
+      "repo-updated",
+      Number.isNaN(updatedAt.getTime())
+        ? "Public repository"
+        : `Updated ${updatedAt.toLocaleDateString(undefined, { month: "short", year: "numeric" })}`
+    );
+    const metadata = createElement("div", "repo-meta");
+    metadata.append(updated);
+    if (repository.private) metadata.append(createElement("span", "repo-visibility", "Private"));
+    top.append(owner, metadata);
 
-    bottom.append(owner, links);
-    card.append(top, title, description, bottom);
+    card.append(
+      top,
+      createElement("h3", "project-name", repository.name),
+      createElement(
+        "p",
+        "project-description",
+        repository.description || "A public project on GitHub. Open the repository to explore the code."
+      )
+    );
+
+    const bottom = createElement("div", "card-bottom");
+    const details = createElement("div", "repo-details");
+    if (repository.language) {
+      const language = createElement("span", "repo-language");
+      language.append(createElement("span", "language-dot", ""), document.createTextNode(repository.language));
+      details.append(language);
+    }
+    details.append(
+      createElement("span", "repo-stat", `★ ${repository.stargazers_count}`),
+      createElement("span", "repo-stat", `⑂ ${repository.forks_count}`)
+    );
+
+    const links = createElement("div", "card-links");
+    links.append(createLink("Explore repo ↗", repository.html_url, "repo-link"));
+    if (repository.has_issues) {
+      links.append(createLink("Issues ↗", `${repository.html_url}/issues`));
+    }
+    bottom.append(details, links);
+    card.append(bottom);
     projectGrid.append(card);
+    revealElement(card, index % 6);
   }
 
-  document.querySelector("#all-count").textContent = String(projects.length);
-  document.querySelector("#help-count").textContent = String(projects.filter((project) => project.needsHelp).length);
-  emptyState.classList.toggle("visible", projects.length === 0);
-  projectGrid.hidden = projects.length === 0;
+  const benachiCount = allRepositories.filter((repo) => repo.owner.login.toLowerCase() === "cyberfox2005").length;
+  const mohamedCount = allRepositories.filter((repo) => repo.owner.login.toLowerCase() === "mohking999").length;
+  document.querySelector("#all-count").textContent = String(allRepositories.length);
+  document.querySelector("#benachi-count").textContent = String(benachiCount);
+  document.querySelector("#mohamed-count").textContent = String(mohamedCount);
+
+  const loading = projectsStatus.dataset.loading === "true";
+  projectsStatus.hidden = loading || allRepositories.length > 0;
+  projectGrid.hidden = loading || visibleRepositories.length === 0;
+  emptyState.classList.toggle("visible", !loading && allRepositories.length > 0 && visibleRepositories.length === 0);
+
+  if (!loading && allRepositories.length === 0) {
+    projectsStatus.hidden = false;
+    projectsStatus.textContent = failedProfiles.length === CONTRIBUTORS.length
+      ? "GitHub projects couldn’t be loaded. Check your connection or try again in a little while."
+      : "No public repositories were found for these profiles yet.";
+    emptyState.classList.remove("visible");
+  } else if (visibleRepositories.length === 0 && allRepositories.length > 0) {
+    document.querySelector("#empty-title").textContent = "No matching projects.";
+    document.querySelector("#empty-description").textContent = "Try a different search or show projects from both of us.";
+  }
 }
 
-function removeProject(id) {
-  const previousProjects = projects;
-  projects = projects.filter((project) => project.id !== id);
-  if (!saveProjects()) {
-    projects = previousProjects;
+async function loadContributors() {
+  projectsStatus.dataset.loading = "true";
+  projectsStatus.hidden = false;
+  projectsStatus.textContent = "Loading repositories from GitHub…";
+
+  const results = await Promise.all(CONTRIBUTORS.map(async (contributor) => {
+    try {
+      const [profile, contributorRepositories] = await Promise.all([
+        githubRequest(`/users/${encodeURIComponent(contributor.handle)}`),
+        fetchRepositories(contributor.handle)
+      ]);
+      return { contributor, profile, repositories: contributorRepositories };
+    } catch (error) {
+      console.error(`Could not load GitHub data for @${contributor.handle}:`, error);
+      return { contributor, profile: null, repositories: [], error };
+    }
+  }));
+
+  failedProfiles = results.filter((result) => result.error);
+  renderPeople(results);
+  repositories = results.flatMap((result) => result.repositories);
+  repositories.sort((a, b) => new Date(b.updated_at) - new Date(a.updated_at));
+  projectsStatus.dataset.loading = "false";
+  renderProjects();
+}
+
+function setPrivateAccessMessage(title, description) {
+  privateAccessTitle.textContent = title;
+  privateAccessDescription.textContent = description;
+}
+
+async function loadPrivateRepositories() {
+  if (window.location.protocol === "file:") {
+    privateSignIn.hidden = true;
+    setPrivateAccessMessage(
+      "Deploy the portfolio to Vercel to enable private access.",
+      "Private repositories are protected by server-side GitHub sign-in. Deploy this site and configure its GitHub App to unlock them."
+    );
     return;
   }
-  renderProjects();
-  showToast("Project removed from this browser.");
+
+  try {
+    const sessionResponse = await fetch("/api/auth/session", { credentials: "same-origin" });
+    if (!sessionResponse.ok) throw new Error(`Sign-in status is unavailable (${sessionResponse.status}).`);
+    const session = await sessionResponse.json();
+    if (!session.authenticated) {
+      setPrivateAccessMessage(
+        "Your private repositories stay private.",
+        "Sign in as Benachi or Mohamed to see private repositories the GitHub App is allowed to access."
+      );
+      return;
+    }
+
+    signedInHandle = session.handle;
+    privateSignIn.hidden = true;
+    privateSignOut.hidden = false;
+    setPrivateAccessMessage(`Signed in as @${signedInHandle}.`, "Loading the private repositories this GitHub App is authorized to read…");
+
+    const response = await fetch("/api/repos", { credentials: "same-origin" });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || `Private repositories are unavailable (${response.status}).`);
+    if (!Array.isArray(data.repositories)) throw new Error("GitHub returned an unexpected private repository list.");
+    privateRepositories = data.repositories;
+    setPrivateAccessMessage(
+      `Signed in as @${signedInHandle}.`,
+      privateRepositories.length
+        ? `${privateRepositories.length} private ${privateRepositories.length === 1 ? "repository is" : "repositories are"} available to this read-only GitHub App installation.`
+        : "No private repositories have been granted to the GitHub App for these accounts."
+    );
+    renderProjects();
+  } catch (error) {
+    console.error("Could not load private GitHub repositories:", error);
+    setPrivateAccessMessage(
+      "Private repositories are unavailable.",
+      `${error.message} Deploy to Vercel and complete the GitHub App setup to enable secure access.`
+    );
+  }
 }
 
-function openDialog() {
-  formError.textContent = "";
-  dialog.showModal();
+async function signOut() {
+  privateSignOut.disabled = true;
+  try {
+    const response = await fetch("/api/auth/logout", {
+      method: "POST",
+      credentials: "same-origin"
+    });
+    if (!response.ok) throw new Error(`Sign-out failed (${response.status}).`);
+    privateRepositories = [];
+    signedInHandle = "";
+    privateSignOut.hidden = true;
+    privateSignIn.hidden = false;
+    setPrivateAccessMessage(
+      "Your private repositories stay private.",
+      "Sign in as Benachi or Mohamed to see private repositories the GitHub App is allowed to access."
+    );
+    renderProjects();
+  } catch (error) {
+    console.error("Could not sign out:", error);
+    setPrivateAccessMessage("Could not sign out.", "Please refresh the page and try again.");
+  } finally {
+    privateSignOut.disabled = false;
+  }
 }
 
-document.querySelector("#open-modal").addEventListener("click", openDialog);
-document.querySelector("#open-modal-secondary").addEventListener("click", openDialog);
-document.querySelector("#empty-add").addEventListener("click", openDialog);
-document.querySelector("#close-modal").addEventListener("click", () => dialog.close());
-document.querySelector("#cancel-modal").addEventListener("click", () => dialog.close());
-dialog.addEventListener("click", (event) => {
-  if (event.target === dialog) dialog.close();
-});
 searchInput.addEventListener("input", renderProjects);
 
 for (const button of document.querySelectorAll(".filter-button")) {
@@ -183,89 +363,35 @@ for (const button of document.querySelectorAll(".filter-button")) {
   });
 }
 
-projectForm.addEventListener("submit", (event) => {
-  event.preventDefault();
-  formError.textContent = "";
-  if (!projectForm.reportValidity()) return;
-
-  const formData = new FormData(projectForm);
-  const repo = safeRepoUrl(String(formData.get("repo")).trim());
-  if (!repo) {
-    formError.textContent = "Enter a GitHub URL in the format https://github.com/owner/repository.";
-    return;
-  }
-
-  const project = {
-    id: crypto.randomUUID(),
-    name: String(formData.get("name")).trim(),
-    repo,
-    description: String(formData.get("description")).trim(),
-    owner: String(formData.get("owner")).trim(),
-    needsHelp: formData.get("needsHelp") === "yes"
-  };
-  if (Object.values(project).some((value) => typeof value === "string" && !value)) {
-    formError.textContent = "Please fill in every field.";
-    return;
-  }
-
-  projects.unshift(project);
-  if (!saveProjects()) {
-    projects.shift();
-    return;
-  }
-
-  projectForm.reset();
-  dialog.close();
+document.querySelector("#reset-filters").addEventListener("click", () => {
   activeFilter = "all";
+  searchInput.value = "";
   for (const button of document.querySelectorAll(".filter-button")) {
     const isActive = button.dataset.filter === "all";
     button.classList.toggle("active", isActive);
     button.setAttribute("aria-pressed", String(isActive));
   }
-  searchInput.value = "";
   renderProjects();
-  showToast("Project added. Let’s build something!");
-  document.querySelector("#projects").scrollIntoView({ behavior: "smooth" });
 });
+privateSignOut.addEventListener("click", signOut);
 
-function updateCountdown() {
-  const now = new Date();
-  const nextDay = new Date(now);
-  nextDay.setDate(now.getDate() + 1);
-  document.querySelector("#event-date").textContent = nextDay.toLocaleDateString(undefined, {
-    weekday: "long",
-    month: "long",
-    day: "numeric"
-  });
-
-  const midnight = new Date(now);
-  midnight.setHours(24, 0, 0, 0);
-  const remainingMinutes = Math.max(0, Math.floor((midnight - now) / 60000));
-  document.querySelector("#countdown-days").textContent = String(Math.floor(remainingMinutes / 1440)).padStart(2, "0");
-  document.querySelector("#countdown-hours").textContent = String(Math.floor((remainingMinutes % 1440) / 60)).padStart(2, "0");
-  document.querySelector("#countdown-minutes").textContent = String(remainingMinutes % 60).padStart(2, "0");
+const authNotice = new URLSearchParams(window.location.search).get("auth");
+if (authNotice) {
+  const authMessages = {
+    success: "GitHub sign-in successful.",
+    "not-authorized": "Only Benachi and Mohamed can sign in to view private projects.",
+    "not-configured": "GitHub sign-in is not configured yet. Finish the Vercel setup first.",
+    invalid: "GitHub sign-in could not be verified. Please try again.",
+    failed: "GitHub sign-in failed. Please try again.",
+    cancelled: "GitHub sign-in was cancelled."
+  };
+  if (authMessages[authNotice]) setPrivateAccessMessage("GitHub sign-in", authMessages[authNotice]);
+  window.history.replaceState({}, document.title, `${window.location.pathname}${window.location.hash}`);
 }
 
-document.querySelector("#share-button").addEventListener("click", async () => {
-  const shareData = { title: document.title, text: "Join me and my friends for a day of building together!", url: window.location.href };
-  try {
-    if (navigator.share) {
-      await navigator.share(shareData);
-    } else if (navigator.clipboard && window.isSecureContext) {
-      await navigator.clipboard.writeText(window.location.href);
-      showToast("Site link copied — send it to your friends!");
-    } else {
-      showToast("Copy this page's address and send it to your friends.");
-    }
-  } catch (error) {
-    if (error.name !== "AbortError") {
-      console.error("Could not share the site:", error);
-      showToast("Sharing failed. Copy the page address and send it to your friends.");
-    }
-  }
-});
+document
+  .querySelectorAll(".hero-copy, .hero-note, .people-section > .section-heading, .projects-section > .section-heading, .board-toolbar, .bottom-cta")
+  .forEach((element, index) => revealElement(element, index));
 
-projects = readProjects();
-renderProjects();
-updateCountdown();
-window.setInterval(updateCountdown, 60000);
+loadContributors();
+loadPrivateRepositories();
